@@ -26,6 +26,13 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> DumpDetails;
     internal static ConfigEntry<bool> IsolateCustomDetails;
 
+    internal static ConfigEntry<KeyboardShortcut> PaintKey;
+    internal static ConfigEntry<KeyboardShortcut> PaintEraseKey;
+    internal static ConfigEntry<string> PaintDetail;
+    internal static ConfigEntry<float> PaintRadius;
+    internal static ConfigEntry<int> PaintCount;
+    internal static ConfigEntry<float> PaintCoverage;
+
     private void Awake()
     {
         Log = Logger;
@@ -73,6 +80,7 @@ public class Plugin : BaseUnityPlugin
         versionConfig.Value = MajorMinorVersion;
 
         DemoDetails.Register();
+        gameObject.AddComponent<DetailPaintTest>();
 
         // Patches
         new TerrainDetailOverridePatch().Enable();
@@ -113,6 +121,7 @@ public class Plugin : BaseUnityPlugin
     {
         const string general = "00. General";
         const string debug = "01. Debug";
+        const string paintTest = "02. Paint Test";
         
         /*
          * General
@@ -147,6 +156,45 @@ public class Plugin : BaseUnityPlugin
         IsolateCustomDetails = Config.Bind(debug, "Isolate Custom Details", false, new ConfigDescription(
             "Removes the map's own details so that only custom ones are drawn. Applies on the next raid.",
             null,
+            new ConfigurationManagerAttributes { Order = 1 }
+        ));
+
+        /*
+         * Paint test
+         */
+        PaintKey = Config.Bind(paintTest, "Paint Key", new KeyboardShortcut(KeyCode.KeypadPlus), new ConfigDescription(
+            "Hold to paint the detail below onto the terrain under the crosshair.",
+            null,
+            new ConfigurationManagerAttributes { Order = 6 }
+        ));
+
+        PaintEraseKey = Config.Bind(paintTest, "Erase Key", new KeyboardShortcut(KeyCode.KeypadMinus), new ConfigDescription(
+            "Hold to remove the detail below from the terrain under the crosshair.",
+            null,
+            new ConfigurationManagerAttributes { Order = 5 }
+        ));
+
+        PaintDetail = Config.Bind(paintTest, "Detail Name", "TFX_Chunk_4", new ConfigDescription(
+            "Name of the detail to paint, as it appears in the log.",
+            null,
+            new ConfigurationManagerAttributes { Order = 4 }
+        ));
+
+        PaintRadius = Config.Bind(paintTest, "Brush Radius", 3f, new ConfigDescription(
+            "Radius of the brush in metres.",
+            new AcceptableValueRange<float>(0.5f, 30f),
+            new ConfigurationManagerAttributes { Order = 3 }
+        ));
+
+        PaintCount = Config.Bind(paintTest, "Instances Per Cell", 1, new ConfigDescription(
+            "Number of instances painting puts into each density cell it picks.",
+            new AcceptableValueRange<int>(1, 16),
+            new ConfigurationManagerAttributes { Order = 2 }
+        ));
+
+        PaintCoverage = Config.Bind(paintTest, "Coverage", 0.25f, new ConfigDescription(
+            "Share of the density cells inside the brush that painting fills. 1 fills every cell.",
+            new AcceptableValueRange<float>(0.01f, 1f),
             new ConfigurationManagerAttributes { Order = 1 }
         ));
     }
