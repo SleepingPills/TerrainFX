@@ -1,5 +1,4 @@
 ﻿using System.IO;
-using System.Linq;
 using System.Reflection;
 using UnityEngine;
 
@@ -24,13 +23,5 @@ internal static class AssetRegistry
 
         Plugin.Log.LogInfo($"Loading TerrainFX Bundle: {assetBundlePath}");
         AssetBundle = AssetBundle.LoadFromFile(assetBundlePath);
-    }
-
-    /// <summary>Finds a shader in the bundle by its shader name ("TerrainFX/DetailLit"), null if it isn't there.</summary>
-    public static Shader FindShader(string shaderName)
-    {
-        return AssetBundle == null
-            ? null
-            : AssetBundle.LoadAllAssets<Shader>().FirstOrDefault(shader => shader.name == shaderName);
     }
 }

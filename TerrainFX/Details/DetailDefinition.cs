@@ -78,16 +78,18 @@ public sealed class DetailDefinition
     /// <summary>
     /// Scales the distances at which the detail switches LOD or disappears for being too small on screen. 2 doubles
     /// those distances, 0.5 halves them. Only affects prefabs with a LODGroup and texture details with crossed quads;
-    /// a mesh detail without a LODGroup is always drawn up to its maximum distance.
+    /// a mesh detail without a LODGroup is always drawn up to its maximum distance. The default of 2.5 is the value
+    /// every one of the game's own details uses on the one map checked so far.
     /// </summary>
-    public float LodBiasAdjustment = 1f;
+    public float LodBiasAdjustment = 2.5f;
 
     /// <summary>
     /// Strength of the game's density mask for this detail (the game multiplies the mask channel by this number).
     /// It does nothing unless the density mask is switched on for the prototype, which custom details leave off;
     /// switch it on in <see cref="Configure"/> (useDensityMask, densityMapIndex, densityChanelMask, densityMinMax).
+    /// The default of 5 is the value every one of the game's own details uses on the one map checked so far.
     /// </summary>
-    public float DensityFadeFactor = 10f;
+    public float DensityFadeFactor = 5f;
 
     /// <summary>
     /// Whether instances cast shadows. Leave it null to do what the game does for its own details: texture details

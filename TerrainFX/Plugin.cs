@@ -133,7 +133,7 @@ public class Plugin : BaseUnityPlugin
         ));
 
         DemoDetailsEnabled = Config.Bind(debug, "Demo Details", true, new ConfigDescription(
-            "Scatters test spheres and magenta tufts over every terrain in 16 m bands. Applies on the next raid.",
+            "Scatters the TFX Foliage prefab from the asset bundle and magenta tufts over every terrain in 16 m bands. Applies on the next raid.",
             null,
             new ConfigurationManagerAttributes { Order = 3 }
         ));

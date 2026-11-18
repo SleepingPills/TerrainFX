@@ -38,13 +38,4 @@ public static class DetailTemplates
 
         return template;
     }
-
-    public static Mesh PrimitiveMesh(PrimitiveType type)
-    {
-        var primitive = GameObject.CreatePrimitive(type);
-        var mesh = primitive.GetComponent<MeshFilter>().sharedMesh;
-        Object.DestroyImmediate(primitive);
-
-        return mesh;
-    }
 }

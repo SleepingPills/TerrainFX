@@ -30,11 +30,17 @@ public static class DetailDiagnostics
 
         if (settings != null)
         {
+            var mask = settings.densityMapArray;
+            var maskInfo = mask == null
+                ? "none"
+                : $"{mask.depth} slices of {mask.width}x{mask.height} {mask.format} mips={mask.mipmapCount} " +
+                  $"filter={mask.filterMode} wrap={mask.wrapMode} readable={mask.isReadable}";
+
             text.AppendLine(
                 $"  settings maxDetailDistance={settings.maxDetailDistance} detailDensity={settings.detailDensity} " +
-                $"cellSize={(settings.autoSPCellSize ? "auto" : settings.preferedSPCellSize.ToString())} " +
-                $"densityMapArray={(settings.densityMapArray != null ? settings.densityMapArray.depth.ToString() : "none")}"
+                $"cellSize={(settings.autoSPCellSize ? "auto" : settings.preferedSPCellSize.ToString())}"
             );
+            text.AppendLine($"  densityMapArray: {maskInfo}");
         }
 
         var prototypes = manager.prototypeList;

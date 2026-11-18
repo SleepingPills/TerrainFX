@@ -1,67 +1,88 @@
 using System.Collections.Generic;
-using GPUInstancer;
 using UnityEngine;
 
 namespace TerrainFX.Details;
 
 /// <summary>
-/// Two throwaway details that exercise both prototype kinds on every map: spheres (mesh) and magenta tufts (texture).
-/// They are laid out in 16 m bands so that the density map's orientation can be read off in game: sphere bands
-/// alternate along world X, tuft bands alternate along world Z.
+/// Test details that are added to every map while the "Demo Details" setting is on:
+///  - one mesh detail for each child of the "TFX Foliage" prefab in the asset bundle
+///  - one texture detail, a magenta tuft generated in code
+/// They are laid out in 16 m wide bands so that the direction of the density map can be checked in game: the mesh
+/// details are in bands that alternate along world X, the tufts are in bands that alternate along world Z.
 /// </summary>
 internal static class DemoDetails
 {
-    private const string LitShaderName = "TerrainFX/DetailLit";
+    private const string FoliagePrefabPath = "Assets/TerrainFX/TFX Foliage.prefab";
     private const float BandWidth = 16f;
 
-    private static Mesh _sphereMesh;
-    private static GameObject _litSphere;
-    private static Texture2D _tuftTexture;
+    // Mesh details are placed in every 4th cell in both directions, which is roughly one per 2.7 x 2.7 m on a
+    // 700 m terrain with a 1024 cell density map
+    private const int MeshCellSpacing = 4;
 
-    // Used while the bundle has no shader yet: sphere templates that use a material copied from one of the map's
-    // own mesh details, remembered together with that material
-    private static readonly List<(Material Source, GameObject Template)> BorrowedSpheres = [];
+    private static readonly List<GameObject> FoliageTemplates = [];
+    private static Texture2D _tuftTexture;
 
     public static void Register()
     {
-        _sphereMesh = DetailTemplates.PrimitiveMesh(PrimitiveType.Sphere);
         _tuftTexture = CreateTuftTexture();
 
-        var litShader = AssetRegistry.FindShader(LitShaderName);
-        if (litShader != null)
-        {
-            DetailShaders.Register(litShader);
-
-            var material = new Material(litShader)
-            {
-                name = "TFX_DemoSphere",
-                color = new Color(1f, 0.45f, 0f),
-                hideFlags = HideFlags.HideAndDontSave
-            };
-            _litSphere = DetailTemplates.Create("TFX_DemoSphere", _sphereMesh, material);
-        }
-        else
-        {
-            Plugin.Log.LogWarning($"Shader {LitShaderName} is not in the bundle, demo spheres will borrow a material from the map");
-        }
+        LoadFoliageTemplates();
 
         DetailRegistry.AddProvider(Provide);
+    }
+
+    /// <summary>
+    /// Creates one hidden copy of the bundle prefab that stays alive for as long as the plugin runs. Each of its
+    /// direct children is one mesh detail.
+    /// </summary>
+    private static void LoadFoliageTemplates()
+    {
+        if (AssetRegistry.AssetBundle == null)
+        {
+            Plugin.Log.LogWarning("No asset bundle loaded, there will be no demo mesh details");
+            return;
+        }
+
+        var prefab = AssetRegistry.AssetBundle.LoadAsset<GameObject>(FoliagePrefabPath);
+        if (prefab == null)
+        {
+            Plugin.Log.LogWarning(
+                $"{FoliagePrefabPath} is not in the asset bundle, there will be no demo mesh details. " +
+                $"The bundle contains: {string.Join(", ", AssetRegistry.AssetBundle.GetAllAssetNames())}"
+            );
+            return;
+        }
+
+        var root = DetailTemplates.Adopt(Object.Instantiate(prefab));
+        root.name = "TFX Foliage (detail templates)";
+
+        foreach (Transform child in root.transform)
+        {
+            if (child.GetComponentInChildren<MeshRenderer>(true) == null)
+            {
+                Plugin.Log.LogWarning($"'{child.name}' in {FoliagePrefabPath} has no MeshRenderer and is ignored");
+                continue;
+            }
+
+            FoliageTemplates.Add(child.gameObject);
+        }
+
+        Plugin.Log.LogInfo($"Loaded {FoliageTemplates.Count} demo mesh detail(s) from {FoliagePrefabPath}");
     }
 
     private static IEnumerable<DetailDefinition> Provide(DetailContext context)
     {
         if (!Plugin.DemoDetailsEnabled.Value) yield break;
 
-        var sphere = _litSphere != null ? _litSphere : BorrowedSphere(context.Manager);
-        if (sphere != null)
+        foreach (var template in FoliageTemplates)
         {
             yield return new DetailDefinition
             {
-                Name = "TFX_DemoSphere",
-                Prefab = sphere,
-                WidthRange = new Vector2(0.3f, 0.6f),
-                HeightRange = new Vector2(0.3f, 0.6f),
-                Density = (map, _) => map.Fill((x, z) => (int)(x / BandWidth) % 2 == 0 ? 1 : 0)
+                Name = $"TFX_{template.name}",
+                Prefab = template,
+                WidthRange = new Vector2(0.8f, 1.2f),
+                HeightRange = new Vector2(0.8f, 1.2f),
+                Density = (map, _) => FillSparseBands(map)
             };
         }
 
@@ -75,55 +96,17 @@ internal static class DemoDetails
         };
     }
 
-    private static GameObject BorrowedSphere(GPUInstancerDetailManager manager)
+    private static void FillSparseBands(DetailDensityMap map)
     {
-        // The game destroys a map's materials when the raid ends. Templates that used one are useless after that.
-        for (var i = BorrowedSpheres.Count - 1; i >= 0; i--)
+        for (var z = 0; z < map.Resolution; z += MeshCellSpacing)
         {
-            if (BorrowedSpheres[i].Source != null) continue;
-
-            Object.Destroy(BorrowedSpheres[i].Template);
-            BorrowedSpheres.RemoveAt(i);
-        }
-
-        var source = FindInstancedMaterial(manager);
-        if (source == null)
-        {
-            Plugin.Log.LogWarning($"No mesh detail on {manager.name} to borrow a material from, skipping demo spheres");
-            return null;
-        }
-
-        foreach (var borrowed in BorrowedSpheres)
-        {
-            if (borrowed.Source == source) return borrowed.Template;
-        }
-
-        var template = DetailTemplates.Create("TFX_DemoSphere", _sphereMesh, source);
-        BorrowedSpheres.Add((source, template));
-
-        return template;
-    }
-
-    private static Material FindInstancedMaterial(GPUInstancerDetailManager manager)
-    {
-        Material fallback = null;
-
-        foreach (var prototype in manager.prototypeList)
-        {
-            if (prototype is not GPUInstancerDetailPrototype { usePrototypeMesh: true } || prototype.prefabObject == null)
+            for (var x = 0; x < map.Resolution; x += MeshCellSpacing)
             {
-                continue;
+                var worldX = (x + 0.5f) * map.CellSize.x;
+
+                if ((int)(worldX / BandWidth) % 2 == 0) map[x, z] = 1;
             }
-
-            var renderer = prototype.prefabObject.GetComponentInChildren<MeshRenderer>(true);
-            if (renderer == null || !DetailShaders.CanInstance(renderer.sharedMaterial)) continue;
-
-            if (prototype.name.ToLower().Contains("rock")) return renderer.sharedMaterial;
-
-            fallback ??= renderer.sharedMaterial;
         }
-
-        return fallback;
     }
 
     private static Texture2D CreateTuftTexture()
