@@ -80,6 +80,7 @@ public class Plugin : BaseUnityPlugin
         versionConfig.Value = MajorMinorVersion;
 
         DemoDetails.Register();
+        DetailSeasons.Initialize();
         gameObject.AddComponent<DetailPaintTest>();
 
         // Patches

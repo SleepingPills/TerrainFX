@@ -82,7 +82,15 @@ internal static class DemoDetails
                 Prefab = template,
                 WidthRange = new Vector2(0.8f, 1.2f),
                 HeightRange = new Vector2(0.8f, 1.2f),
-                Density = (map, _) => FillSparseBands(map)
+                Density = (map, _) => FillSparseBands(map),
+                // Colours only, the textures stay the ones from the bundle. Summer has no entry and is left as authored.
+                SeasonLooks =
+                {
+                    [ESeason.Spring] = new DetailSeasonLook { Color = new Color(0.8f, 0.95f, 0.6f) },
+                    [ESeason.Autumn] = new DetailSeasonLook { Color = new Color(0.9f, 0.6f, 0.3f) },
+                    [ESeason.AutumnLate] = new DetailSeasonLook { Color = new Color(0.6f, 0.45f, 0.3f) },
+                    [ESeason.Winter] = new DetailSeasonLook { Color = new Color(0.55f, 0.5f, 0.45f) }
+                }
             };
         }
 

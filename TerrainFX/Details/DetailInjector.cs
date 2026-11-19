@@ -18,7 +18,14 @@ namespace TerrainFX.Details;
 /// </summary>
 public static class DetailInjector
 {
-    private static readonly List<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype)> Injected = [];
+    private static readonly List<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, DetailDefinition Definition)> Injected = [];
+
+    /// <summary>
+    /// Every custom prototype that has been added, with the manager it was added to and the definition it was built
+    /// from. Entries of managers from an earlier raid stay in the list until the next map loads; their manager is
+    /// null by then.
+    /// </summary>
+    internal static IReadOnlyList<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, DetailDefinition Definition)> InjectedDetails => Injected;
 
     public static int Inject(GPUInstancerDetailManager manager)
     {
@@ -50,7 +57,7 @@ public static class DetailInjector
                 var prototype = Build(definition, context, manager.prototypeList.Count);
 
                 manager.prototypeList.Add(prototype);
-                Injected.Add((manager, prototype));
+                Injected.Add((manager, prototype, definition));
                 added++;
             }
             catch (Exception e)

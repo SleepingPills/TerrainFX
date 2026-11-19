@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using GPUInstancer;
 using UnityEngine;
 
@@ -28,6 +29,27 @@ public sealed class DetailContext
 }
 
 /// <summary>
+/// How the materials of a mesh detail look in one season. Every field is optional: a field that is left unset keeps
+/// what the material has in the asset bundle, so a look can start out as nothing more than a colour.
+/// These are the same four material properties the game changes for its own seasonal materials on the
+/// "p0/Bumped Specular SMap" shader. A property the material's shader does not have is skipped.
+/// </summary>
+public sealed class DetailSeasonLook
+{
+    /// <summary>Replaces the material's main texture (_MainTex). Leave it null to keep the material's own texture.</summary>
+    public Texture MainTexture;
+
+    /// <summary>Replaces the material's normal map (_BumpMap). Leave it null to keep the material's own normal map.</summary>
+    public Texture NormalMap;
+
+    /// <summary>Replaces the material's colour (_Color). Leave it null to keep the material's own colour.</summary>
+    public Color? Color;
+
+    /// <summary>Replaces the material's base tint (_BaseTintColor). Leave it null to keep the material's own tint.</summary>
+    public Color? BaseTintColor;
+}
+
+/// <summary>
 /// Describes one custom terrain detail. Set <see cref="Prefab"/> to get a mesh detail (rocks, twigs), or set
 /// <see cref="Texture"/> to get a texture detail (grass style crossed quads drawn with the game's foliage shader).
 /// Exactly one of the two must be set.
@@ -47,6 +69,14 @@ public sealed class DetailDefinition
     /// <see cref="DetailTemplates"/> takes care of.
     /// </summary>
     public GameObject Prefab;
+
+    /// <summary>
+    /// Mesh details only: how the detail's materials look in each season. The look is applied to every material of
+    /// <see cref="Prefab"/>. A season without an entry shows the materials exactly as they are in the asset bundle,
+    /// with two exceptions: AutumnLate uses the Autumn entry and SpringEarly uses the Spring entry when they have
+    /// none of their own.
+    /// </summary>
+    public readonly Dictionary<ESeason, DetailSeasonLook> SeasonLooks = new();
 
     /// <summary>Texture details only: the image drawn on the quads.</summary>
     public Texture2D Texture;
