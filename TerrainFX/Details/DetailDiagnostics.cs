@@ -1,4 +1,3 @@
-using System.Linq;
 using System.Text;
 using GPUInstancer;
 using UnityEngine;
@@ -64,9 +63,12 @@ public static class DetailDiagnostics
         var cells = prototype.cachedDensityMapForInstance;
         var resolution = cells == null ? 0 : Mathf.FloorToInt(Mathf.Sqrt(cells.Length));
 
+        long instances = 0;
+        for (var i = 0; cells != null && i < cells.Length; i++) instances += cells[i];
+
         text.AppendLine(
             $"  [{index}] '{prototype.name}' {(prototype.usePrototypeMesh ? "mesh" : "texture")} " +
-            $"densityRes={resolution} instances={(cells == null ? 0 : cells.Sum(c => (long)c))} scale={prototype.detailScale} " +
+            $"densityRes={resolution} instances={instances} scale={prototype.detailScale} " +
             $"maxDist={prototype.maxDistance} density={prototype.detailDensity} shadows={prototype.isShadowCasting} " +
             $"densityMask={prototype.useDensityMask} alphaMask={prototype.useAlphaMask} vertexFit={prototype.useVertexFit}"
         );
@@ -97,9 +99,15 @@ public static class DetailDiagnostics
         var prefab = prototype.prefabObject;
         text.AppendLine($"       prefab='{prefab.name}' lodGroup={prefab.GetComponent<LODGroup>() != null}");
 
-        foreach (var renderer in prefab.GetComponentsInChildren<MeshRenderer>(true))
+        var renderers = prefab.GetComponentsInChildren<MeshRenderer>(true);
+        for (var i = 0; i < renderers.Length; i++)
         {
-            var materials = string.Join(", ", renderer.sharedMaterials.Select(ShaderInfo));
+            var renderer = renderers[i];
+            var sharedMaterials = renderer.sharedMaterials;
+            var shaderInfos = new string[sharedMaterials.Length];
+            for (var m = 0; m < sharedMaterials.Length; m++) shaderInfos[m] = ShaderInfo(sharedMaterials[m]);
+
+            var materials = string.Join(", ", shaderInfos);
             text.AppendLine($"       renderer '{renderer.name}' layer={renderer.gameObject.layer} shadows={renderer.shadowCastingMode}: {materials}");
         }
     }
@@ -124,10 +132,15 @@ public static class DetailDiagnostics
         var text = new StringBuilder();
         text.AppendLine($"GPUI matrix handling: {GPUInstancerUtility.matrixHandlingType}, shader bindings:");
 
-        foreach (var instance in settings.shaderBindings.shaderInstances ?? [])
+        var instances = settings.shaderBindings.shaderInstances;
+        if (instances != null)
         {
-            var instanced = instance.instancedShader != null ? instance.instancedShader.name : "NULL";
-            text.AppendLine($"  '{instance.name}' -> '{instanced}' original={instance.isOriginalInstanced} ext='{instance.extensionCode}'");
+            for (var i = 0; i < instances.Count; i++)
+            {
+                var instance = instances[i];
+                var instanced = instance.instancedShader != null ? instance.instancedShader.name : "NULL";
+                text.AppendLine($"  '{instance.name}' -> '{instanced}' original={instance.isOriginalInstanced} ext='{instance.extensionCode}'");
+            }
         }
 
         string[] wellKnown =
@@ -139,8 +152,9 @@ public static class DetailDiagnostics
             GPUInstancerConstants.SHADER_GPUI_SHADOWS_ONLY
         ];
 
-        foreach (var name in wellKnown)
+        for (var i = 0; i < wellKnown.Length; i++)
         {
+            var name = wellKnown[i];
             text.AppendLine($"  Shader.Find('{name}') = {(Shader.Find(name) != null ? "present" : "MISSING")}");
         }
 

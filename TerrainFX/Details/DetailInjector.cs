@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using EFT;
 using GPUInstancer;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -18,14 +19,14 @@ namespace TerrainFX.Details;
 /// </summary>
 public static class DetailInjector
 {
-    private static readonly List<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, DetailDefinition Definition)> Injected = [];
+    private static readonly List<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, Detail Definition)> Injected = [];
 
     /// <summary>
     /// Every custom prototype that has been added, with the manager it was added to and the definition it was built
     /// from. Entries of managers from an earlier raid stay in the list until the next map loads; their manager is
     /// null by then.
     /// </summary>
-    internal static IReadOnlyList<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, DetailDefinition Definition)> InjectedDetails => Injected;
+    internal static IReadOnlyList<(GPUInstancerDetailManager Manager, GPUInstancerDetailPrototype Prototype, Detail Definition)> InjectedDetails => Injected;
 
     public static int Inject(GPUInstancerDetailManager manager)
     {
@@ -40,11 +41,14 @@ public static class DetailInjector
 
         manager.prototypeList ??= [];
 
-        var context = new DetailContext(manager);
+        DetailDensityStore.SetMap(ResolveMapId(manager));
+
         var added = 0;
 
-        foreach (var definition in DetailRegistry.Collect(context))
+        var definitions = DetailRegistry.Details;
+        for (var i = 0; i < definitions.Count; i++)
         {
+            var definition = definitions[i];
             try
             {
                 var problem = Validate(definition, manager);
@@ -54,7 +58,7 @@ public static class DetailInjector
                     continue;
                 }
 
-                var prototype = Build(definition, context, manager.prototypeList.Count);
+                var prototype = Build(definition, manager, manager.prototypeList.Count);
 
                 manager.prototypeList.Add(prototype);
                 Injected.Add((manager, prototype, definition));
@@ -76,24 +80,56 @@ public static class DetailInjector
     /// </summary>
     public static void EnableMeshShadows(List<GPUInstancerRuntimeData> runtimeDataList)
     {
-        foreach (var runtimeData in runtimeDataList)
+        for (var i = 0; i < runtimeDataList.Count; i++)
         {
+            var runtimeData = runtimeDataList[i];
             if (runtimeData.prototype is not GPUInstancerDetailPrototype { usePrototypeMesh: true, isShadowCasting: true } prototype)
             {
                 continue;
             }
 
-            if (Injected.Exists(entry => entry.Prototype == prototype))
+            for (var e = 0; e < Injected.Count; e++)
             {
+                if (Injected[e].Prototype != prototype) continue;
+
                 runtimeData.hasShadowCasterBuffer = true;
+                break;
             }
         }
     }
 
-    private static GPUInstancerDetailPrototype Build(DetailDefinition definition, DetailContext context, int index)
+    /// <summary>
+    /// Returns the runtime data of <paramref name="prototype"/> in <paramref name="runtimeDataList"/>, or null when
+    /// the list is null or holds no runtime data for it.
+    /// </summary>
+    internal static GPUInstancerRuntimeData FindRuntimeData(List<GPUInstancerRuntimeData> runtimeDataList, GPUInstancerPrototype prototype)
     {
-        var manager = context.Manager;
-        var settings = context.Settings;
+        if (runtimeDataList == null) return null;
+
+        for (var i = 0; i < runtimeDataList.Count; i++)
+        {
+            if (runtimeDataList[i].prototype == prototype) return runtimeDataList[i];
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The id of the map being loaded, which names the folder its density maps are stored in. The raid settings know
+    /// the map before its scenes load; the scene name of the manager is used when they don't, and "unknown" when
+    /// neither is available.
+    /// </summary>
+    private static string ResolveMapId(GPUInstancerDetailManager manager)
+    {
+        var mapId = TarkovApplication.Exist(out var app) ? app.CurrentRaidSettings?.SelectedLocation?.Id : null;
+        if (string.IsNullOrEmpty(mapId)) mapId = manager.gameObject.scene.name;
+
+        return string.IsNullOrEmpty(mapId) ? "unknown" : mapId;
+    }
+
+    private static GPUInstancerDetailPrototype Build(Detail definition, GPUInstancerDetailManager manager, int index)
+    {
+        var settings = manager.terrainSettings;
         var isMesh = definition.IsMesh;
 
         // Field for field what GPUInstancerUtility.AddDetailInstancePrototypeFromTerrainPrototype does for a Unity
@@ -150,30 +186,31 @@ public static class DetailInjector
         // Mesh details draw their shadows with each renderer's own instanced material, see EnableMeshShadows
         prototype.useOriginalShaderForShadow = isMesh;
 
-        var resolution = definition.DensityResolution > 0
-            ? definition.DensityResolution
-            : context.TerrainData.detailResolution;
-        var density = new DetailDensityMap(resolution, context.TerrainData.size);
-        definition.Density?.Invoke(density, context);
-        prototype.cachedDensityMapForInstance = density.Cells;
+        // A detail that has never been painted on this terrain gets a map of zeros, so it can be painted later
+        var resolution = manager.terrain.terrainData.detailResolution;
+        var density = DetailDensityStore.Load(manager.terrain, definition, resolution);
+        prototype.cachedDensityMapForInstance = density;
 
-        definition.Configure?.Invoke(prototype, context);
+        long instances = 0;
+        for (var i = 0; i < density.Length; i++) instances += density[i];
 
         Plugin.Log.LogInfo(
             $"Detail '{prototype.name}' -> {manager.name} [{index}] {(isMesh ? "mesh" : "texture")}, " +
-            $"density {resolution}x{resolution}, {density.TotalInstances()} instances over the terrain"
+            $"density {resolution}x{resolution}, {instances} instances over the terrain"
         );
 
         return prototype;
     }
 
-    private static string Validate(DetailDefinition definition, GPUInstancerDetailManager manager)
+    private static string Validate(Detail definition, GPUInstancerDetailManager manager)
     {
         if (definition == null) return "definition is null";
         if (string.IsNullOrEmpty(definition.Name)) return "no name";
 
-        foreach (var existing in manager.prototypeList)
+        var prototypes = manager.prototypeList;
+        for (var i = 0; i < prototypes.Count; i++)
         {
+            var existing = prototypes[i];
             if (existing != null && existing.name == definition.Name) return "a prototype with this name already exists";
         }
 
@@ -200,16 +237,18 @@ public static class DetailInjector
         var renderers = prefab.GetComponentsInChildren<MeshRenderer>(true);
         if (renderers.Length == 0) return "prefab has no MeshRenderer";
 
-        foreach (var renderer in renderers)
+        for (var r = 0; r < renderers.Length; r++)
         {
+            var renderer = renderers[r];
             var filter = renderer.GetComponent<MeshFilter>();
             if (filter == null || filter.sharedMesh == null) return $"renderer '{renderer.name}' has no mesh";
 
             var materials = renderer.sharedMaterials;
             if (materials.Length == 0) return $"renderer '{renderer.name}' has no materials";
 
-            foreach (var material in materials)
+            for (var m = 0; m < materials.Length; m++)
             {
+                var material = materials[m];
                 if (material == null || material.shader == null) return $"renderer '{renderer.name}' has a missing material";
 
                 if (!DetailShaders.CanInstance(material))

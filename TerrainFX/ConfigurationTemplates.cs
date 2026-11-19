@@ -18,9 +18,13 @@ public static class ConfigurationTemplates
     
     public static void SetDefaults(ConfigFile mainConfig)
     {
-        foreach (var pair in mainConfig)
+        var keys = new ConfigDefinition[mainConfig.Count];
+        mainConfig.Keys.CopyTo(keys, 0);
+
+        for (var i = 0; i < keys.Length; i++)
         {
-            pair.Value.BoxedValue = pair.Value.DefaultValue;
+            var entry = mainConfig[keys[i]];
+            entry.BoxedValue = entry.DefaultValue;
         }
     }
 }

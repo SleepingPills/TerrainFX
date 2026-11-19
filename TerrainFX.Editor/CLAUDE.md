@@ -46,5 +46,7 @@ Store density maps in a grayscale png file if possible, so that they can also be
 * Few abstraction
 * Composition over inheritance
 * Keep reflection to a minimum
+* Use for loops instead of foreach
+* Never use linq unless there's absolutely no other way
 
 In this respect, get rid of the various Action hooks as they are difficult to follow.

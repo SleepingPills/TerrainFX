@@ -23,7 +23,7 @@ namespace TerrainFX.Details;
 /// </summary>
 public static class DetailShaders
 {
-    private static readonly Dictionary<string, Shader> Registered = new();
+    private static readonly List<(string Name, Shader Shader)> Registered = new();
 
     private static readonly List<string> UnityShaders = ReadNameList("_standardUnityShaders");
     private static readonly List<string> UnityShadersGpui = ReadNameList("_standardUnityShadersGPUI");
@@ -49,8 +49,22 @@ public static class DetailShaders
     {
         if (string.IsNullOrEmpty(sourceShaderName) || gpuiReadyShader == null) return;
 
-        Registered[sourceShaderName] = gpuiReadyShader;
+        var index = FindRegistered(sourceShaderName);
+        if (index >= 0) Registered[index] = (sourceShaderName, gpuiReadyShader);
+        else Registered.Add((sourceShaderName, gpuiReadyShader));
+
         Apply();
+    }
+
+    /// <summary>Returns the index of the registration for <paramref name="name"/>, or -1 when there is none.</summary>
+    private static int FindRegistered(string name)
+    {
+        for (var i = 0; i < Registered.Count; i++)
+        {
+            if (Registered[i].Name == name) return i;
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -64,12 +78,21 @@ public static class DetailShaders
 
         bindings.shaderInstances ??= new List<ShaderInstance>();
 
-        foreach (var (name, shader) in Registered)
+        for (var r = 0; r < Registered.Count; r++)
         {
+            var (name, shader) = Registered[r];
             if (shader == null) continue;
 
             var isOriginal = name == shader.name;
-            var existing = bindings.shaderInstances.Find(i => i.name == name && string.IsNullOrEmpty(i.extensionCode));
+            ShaderInstance existing = null;
+            var instances = bindings.shaderInstances;
+            for (var i = 0; i < instances.Count; i++)
+            {
+                if (instances[i].name != name || !string.IsNullOrEmpty(instances[i].extensionCode)) continue;
+
+                existing = instances[i];
+                break;
+            }
 
             if (existing == null)
             {
@@ -94,8 +117,10 @@ public static class DetailShaders
 
         if (bindings.shaderInstances != null)
         {
-            foreach (var instance in bindings.shaderInstances)
+            var instances = bindings.shaderInstances;
+            for (var i = 0; i < instances.Count; i++)
             {
+                var instance = instances[i];
                 if (instance.name == shaderName && string.IsNullOrEmpty(instance.extensionCode))
                 {
                     return instance.instancedShader;

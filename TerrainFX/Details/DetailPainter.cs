@@ -1,11 +1,55 @@
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Reflection;
 using GPUInstancer;
 using HarmonyLib;
 using UnityEngine;
 
 namespace TerrainFX.Details;
+
+/// <summary>The shape and effect of one brush stamp, see <see cref="DetailPainter.CollectEdits"/>.</summary>
+public struct DetailBrush
+{
+    /// <summary>Radius of the brush in metres. A radius of 0 or less changes nothing.</summary>
+    public float Radius;
+
+    /// <summary>
+    /// How many instances painting puts into each density cell it picks. It is capped at the detail's
+    /// <see cref="Detail.MaxCount"/>. Erasing ignores it.
+    /// </summary>
+    public int Count;
+
+    /// <summary>
+    /// The share of density cells, from 0 to 1, that painting fills in the solid middle of the brush. Which cells are
+    /// picked is fixed per cell, so painting the same spot twice changes nothing. Erasing ignores it.
+    /// </summary>
+    public float Coverage;
+
+    /// <summary>
+    /// The share of the radius, from 0 to 1, that has the full effect. Beyond it the effect fades linearly to nothing
+    /// at the rim: fewer cells are painted, or fewer are erased. 1 gives a hard edged circle, 0 fades all the way
+    /// from the centre.
+    /// </summary>
+    public float Hardness;
+
+    /// <summary>When true the brush removes instances instead of adding them.</summary>
+    public bool Erase;
+}
+
+/// <summary>
+/// One changed density cell, kept so the change can be undone. <see cref="Index"/> is z * resolution + x in the
+/// detail's density map.
+/// </summary>
+public struct DetailCellEdit
+{
+    /// <summary>The cell's position in the density map, z * resolution + x.</summary>
+    public int Index;
+
+    /// <summary>The cell's instance count before the edit.</summary>
+    public int Before;
+
+    /// <summary>The cell's instance count after the edit.</summary>
+    public int After;
+}
 
 /// <summary>
 /// Changes the density of one detail around a point on a terrain while the raid is running.
@@ -17,6 +61,10 @@ namespace TerrainFX.Details;
 ///  3. Generate the missing buffers with the game's compute shader, then join the buffers of all active cells into
 ///     the one buffer the detail is drawn from.
 /// The game's own routine does step 3 for every detail of the manager. Only the painted one is redone here.
+///
+/// Every terrain has two detail managers, one for the main camera and one for the scope camera, each with its own
+/// copy of the density map. Which cells a stamp changes is decided once on the main camera's manager
+/// (<see cref="CollectEdits"/>), and the same changes are then written into both (<see cref="Apply"/>).
 /// </summary>
 public static class DetailPainter
 {
@@ -25,83 +73,71 @@ public static class DetailPainter
     private static readonly FieldInfo ReplacingField = AccessTools.Field(typeof(GPUInstancerTerrainManager), "replacingInstances");
     private static readonly FieldInfo GrassComputeField = AccessTools.Field(typeof(GPUInstancerDetailManager), "_grassInstantiationComputeShader");
 
+    // Salt of the second per-cell hash, so the cells an eraser thins out are not the same ones painting picks
+    private const uint EraseSalt = 0x9e3779b9;
+
+    // Edits of the stamp that Paint is applying
+    private static readonly List<DetailCellEdit> StampEdits = [];
+
+    // Terrain cells whose density copy ApplyOnManager changed, reused so that applying a stamp does not allocate
+    private static readonly List<GPUInstancerDetailCell> TouchedCells = [];
+
+    // Managers whose density map did not match the main camera's one, so the error is only logged once for each
+    private static readonly HashSet<GPUInstancerDetailManager> MismatchLogged = [];
+
+    // Terrain and detail name pairs a "detail not found" warning was logged for, so each is only logged once
+    private static readonly HashSet<(Terrain Terrain, string DetailName)> MissingLogged = [];
+
     /// <summary>
-    /// Paints or erases a circle on every detail manager of <paramref name="terrain"/> (main camera and scope).
-    /// Painting raises a share of the density cells in the circle to <paramref name="count"/> instances; the share
-    /// is <paramref name="coverage"/> (0 to 1) and which cells are picked is fixed per cell, so painting the same
-    /// spot twice changes nothing. Erasing sets every cell in the circle to 0.
+    /// Works out which density cells one brush stamp at <paramref name="worldPoint"/> would change, reading the
+    /// current counts from the terrain's main camera detail manager, and appends them to <paramref name="edits"/>.
+    /// Nothing is changed on the terrain. It only visits the cells under the brush, so it is cheap enough to call every
+    /// frame (for example to draw a brush overlay). A missing detail is warned about once per terrain and detail
+    /// name; later calls for the same pair stay quiet.
     /// </summary>
-    /// <returns>The number of density cells that changed on the main camera's manager.</returns>
-    public static int Paint(Terrain terrain, Vector3 worldPoint, string detailName, float radius, int count, float coverage, bool erase)
+    /// <returns>
+    /// False, with nothing appended, when the detail is not registered, is not on this terrain, or the terrain's
+    /// detail manager is not ready to be painted on (still loading or rebuilding). True otherwise, even when the stamp
+    /// changes no cells.
+    /// </returns>
+    public static bool CollectEdits(Terrain terrain, Vector3 worldPoint, string detailName, DetailBrush brush, List<DetailCellEdit> edits)
     {
-        var changedOnMain = 0;
-        var found = false;
-
-        foreach (var manager in GPUInstancerManager.activeManagerList ?? [])
+        var detail = DetailRegistry.Find(detailName);
+        if (detail == null)
         {
-            if (manager is not GPUInstancerDetailManager detailManager || detailManager.terrain != terrain) continue;
-
-            var index = detailManager.prototypeList.FindIndex(p => p != null && p.name == detailName);
-            if (index < 0) continue;
-
-            found = true;
-
-            var timer = Stopwatch.StartNew();
-            var changed = PaintOnManager(detailManager, index, worldPoint, radius, count, coverage, erase, out var cells, out var instances);
-            timer.Stop();
-
-            if (!detailManager.IsOptic) changedOnMain = changed;
-
-            if (changed > 0)
-            {
-                Plugin.Log.LogInfo(
-                    $"{(erase ? "Erased" : "Painted")} '{detailName}' on {detailManager.name}: {changed} density cells in " +
-                    $"{cells} terrain cell(s), {instances} instances now active, {timer.Elapsed.TotalMilliseconds:F2} ms on the CPU"
-                );
-            }
+            if (MissingLogged.Add((terrain, detailName))) Plugin.Log.LogWarning($"No detail named '{detailName}' is registered");
+            return false;
         }
 
-        if (!found) Plugin.Log.LogWarning($"No detail named '{detailName}' on terrain {terrain.name}");
-
-        return changedOnMain;
-    }
-
-    private static int PaintOnManager(
-        GPUInstancerDetailManager manager, int index, Vector3 worldPoint, float radius, int count, float coverage, bool erase,
-        out int touchedCellCount, out int activeInstances
-    )
-    {
-        touchedCellCount = 0;
-        activeInstances = 0;
-
-        var spatialData = SpatialDataField.GetValue(manager) as GPUInstancerSpatialPartitioningData<GPUInstancerCell>;
-        if (spatialData == null || !manager.isInitialized || (bool)InitializingField.GetValue(manager))
+        var manager = FindManager(terrain, false, detailName, out var index);
+        if (manager == null)
         {
-            return 0;
+            WarnNotOnTerrain(terrain, detailName);
+            return false;
         }
+
+        if (!IsReady(manager)) return false;
 
         var prototype = (GPUInstancerDetailPrototype)manager.prototypeList[index];
         var densityMap = prototype.cachedDensityMapForInstance;
         var resolution = prototype.detailResolution;
-        var cellsPerSide = spatialData.cellRowAndCollumnCountPerTerrain;
 
-        if (densityMap == null || resolution <= 0 || densityMap.Length != resolution * resolution) return 0;
+        if (densityMap == null || resolution <= 0 || densityMap.Length != resolution * resolution) return false;
+        if (brush.Radius <= 0f) return true;
 
-        // Number of density cells along one side of a terrain cell
-        var perCell = resolution / cellsPerSide;
+        var radius = brush.Radius;
+        var hardness = Mathf.Clamp01(brush.Hardness);
+        var count = Mathf.Min(brush.Count, detail.MaxCount);
 
-        var terrainSize = manager.terrain.terrainData.size;
+        var terrainSize = terrain.terrainData.size;
         var stepX = terrainSize.x / resolution;
         var stepZ = terrainSize.z / resolution;
-        var local = worldPoint - manager.terrain.transform.position;
+        var local = worldPoint - terrain.transform.position;
 
         var minX = Mathf.Max(0, Mathf.FloorToInt((local.x - radius) / stepX));
         var maxX = Mathf.Min(resolution - 1, Mathf.FloorToInt((local.x + radius) / stepX));
         var minZ = Mathf.Max(0, Mathf.FloorToInt((local.z - radius) / stepZ));
         var maxZ = Mathf.Min(resolution - 1, Mathf.FloorToInt((local.z + radius) / stepZ));
-
-        var touchedCells = new HashSet<GPUInstancerDetailCell>();
-        var changed = 0;
 
         for (var z = minZ; z <= maxZ; z++)
         {
@@ -109,69 +145,241 @@ public static class DetailPainter
             {
                 var offsetX = (x + 0.5f) * stepX - local.x;
                 var offsetZ = (z + 0.5f) * stepZ - local.z;
-                if (offsetX * offsetX + offsetZ * offsetZ > radius * radius) continue;
+                var t = Mathf.Sqrt(offsetX * offsetX + offsetZ * offsetZ) / radius;
+                if (t > 1f) continue;
 
-                var current = densityMap[z * resolution + x];
+                // Full effect up to the hardness, then fading linearly to nothing at the rim
+                var weight = t <= hardness ? 1f : (1f - t) / (1f - hardness);
+
+                var cellIndex = z * resolution + x;
+                var current = densityMap[cellIndex];
                 int target;
 
-                if (erase) target = 0;
-                else if (IsPicked(x, z, coverage)) target = Mathf.Max(current, count);
-                else continue;
+                if (brush.Erase)
+                {
+                    if (current == 0 || CellHash(x, z, EraseSalt) >= weight) continue;
+                    target = 0;
+                }
+                else
+                {
+                    if (CellHash(x, z, 0) >= brush.Coverage * weight) continue;
+                    target = Mathf.Max(current, count);
+                }
 
                 if (target == current) continue;
 
-                densityMap[z * resolution + x] = target;
-                changed++;
-
-                // The same value in the copy held by the terrain cell this density cell falls into
-                var cellX = x / perCell;
-                var cellZ = z / perCell;
-                if (cellX >= cellsPerSide || cellZ >= cellsPerSide) continue;
-
-                spatialData.GetCell(GPUInstancerCell.CalculateHash(cellX, 0, cellZ), out var cell);
-                if (cell is not GPUInstancerDetailCell detailCell) continue;
-                if (detailCell.detailMapData == null || index >= detailCell.detailMapData.Count) continue;
-
-                var cellMap = detailCell.detailMapData[index];
-                var cellIndex = x % perCell + z % perCell * perCell;
-
-                detailCell.totalDetailCounts[index] += target - cellMap[cellIndex];
-                cellMap[cellIndex] = target;
-                touchedCells.Add(detailCell);
+                edits.Add(new DetailCellEdit { Index = cellIndex, Before = current, After = target });
             }
         }
 
-        if (touchedCells.Count == 0) return changed;
+        return true;
+    }
 
-        foreach (var cell in touchedCells)
+    /// <summary>
+    /// Writes edits into both detail managers of <paramref name="terrain"/>: each cell gets its After count, or its
+    /// Before count when <paramref name="undo"/> is true (the edits are then gone through from last to first, so a
+    /// list holding several edits of the same cell ends at the first edit's Before). The changed parts of the detail
+    /// are rebuilt on the spot and the terrain and detail are marked as unsaved in <see cref="DetailDensityStore"/>.
+    /// A manager that is still loading or rebuilding is left unchanged.
+    /// </summary>
+    public static void Apply(Terrain terrain, string detailName, List<DetailCellEdit> edits, bool undo)
+    {
+        if (edits.Count == 0) return;
+
+        var main = FindManager(terrain, false, detailName, out var mainIndex);
+        if (main == null)
         {
+            WarnNotOnTerrain(terrain, detailName);
+            return;
+        }
+
+        var mainLength = ((GPUInstancerDetailPrototype)main.prototypeList[mainIndex]).cachedDensityMapForInstance?.Length ?? 0;
+
+        ApplyOnManager(main, mainIndex, edits, undo);
+
+        var optic = FindManager(terrain, true, detailName, out var opticIndex);
+        if (optic != null)
+        {
+            var opticLength = ((GPUInstancerDetailPrototype)optic.prototypeList[opticIndex]).cachedDensityMapForInstance?.Length ?? 0;
+
+            if (opticLength == mainLength)
+            {
+                ApplyOnManager(optic, opticIndex, edits, undo);
+            }
+            else if (MismatchLogged.Add(optic))
+            {
+                Plugin.Log.LogError(
+                    $"'{detailName}' has a density map of {opticLength} cells on {optic.name} but {mainLength} on {main.name}, " +
+                    "painting is not shown through scopes on this terrain"
+                );
+            }
+        }
+
+        DetailDensityStore.MarkDirty(terrain, detailName);
+    }
+
+    /// <summary>
+    /// Works out the cells one brush stamp changes (<see cref="CollectEdits"/>) and writes them into the terrain
+    /// (<see cref="Apply"/>). The edits are appended to <paramref name="edits"/> so the stamp can be undone later;
+    /// pass null when there is nothing to undo.
+    /// </summary>
+    /// <returns>The number of density cells that changed.</returns>
+    public static int Paint(Terrain terrain, Vector3 worldPoint, string detailName, DetailBrush brush, List<DetailCellEdit> edits)
+    {
+        StampEdits.Clear();
+
+        if (!CollectEdits(terrain, worldPoint, detailName, brush, StampEdits)) return 0;
+
+        Apply(terrain, detailName, StampEdits, false);
+        edits?.AddRange(StampEdits);
+
+        return StampEdits.Count;
+    }
+
+    /// <summary>
+    /// Gets the number of density cells along one side of the terrain for a detail, as used by the main camera's
+    /// detail manager. Each cell covers terrain size / resolution metres. Returns false when the detail is not on this
+    /// terrain or its manager has not finished loading.
+    /// </summary>
+    public static bool TryGetResolution(Terrain terrain, string detailName, out int resolution)
+    {
+        resolution = 0;
+
+        var manager = FindManager(terrain, false, detailName, out var index);
+        if (manager == null) return false;
+
+        var prototype = (GPUInstancerDetailPrototype)manager.prototypeList[index];
+        var densityMap = prototype.cachedDensityMapForInstance;
+        if (densityMap == null || prototype.detailResolution <= 0 || densityMap.Length != prototype.detailResolution * prototype.detailResolution)
+        {
+            return false;
+        }
+
+        resolution = prototype.detailResolution;
+        return true;
+    }
+
+    /// <summary>Logs that the detail is not on the terrain, but only the first time for each terrain and detail name.</summary>
+    private static void WarnNotOnTerrain(Terrain terrain, string detailName)
+    {
+        if (MissingLogged.Add((terrain, detailName))) Plugin.Log.LogWarning($"No detail named '{detailName}' on terrain {terrain.name}");
+    }
+
+    /// <summary>The terrain's main camera or scope detail manager holding the named detail, or null when there is none.</summary>
+    private static GPUInstancerDetailManager FindManager(Terrain terrain, bool optic, string detailName, out int index)
+    {
+        index = -1;
+
+        var managers = GPUInstancerManager.activeManagerList;
+        if (managers == null) return null;
+
+        for (var i = 0; i < managers.Count; i++)
+        {
+            var manager = managers[i];
+            if (manager is not GPUInstancerDetailManager detailManager) continue;
+            if (detailManager.terrain != terrain || detailManager.IsOptic != optic || detailManager.prototypeList == null) continue;
+
+            var prototypes = detailManager.prototypeList;
+            for (var p = 0; p < prototypes.Count; p++)
+            {
+                var prototype = prototypes[p];
+                if (prototype is not GPUInstancerDetailPrototype || prototype.name != detailName) continue;
+
+                index = p;
+                return detailManager;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// True when the manager has finished loading its cells and is not in the middle of setting them up again. The
+    /// game keeps the per-cell density copies in its spatial data, which only exists from then on.
+    /// </summary>
+    private static bool IsReady(GPUInstancerDetailManager manager)
+    {
+        return SpatialDataField.GetValue(manager) is GPUInstancerSpatialPartitioningData<GPUInstancerCell>
+               && manager.isInitialized
+               && !(bool)InitializingField.GetValue(manager);
+    }
+
+    private static void ApplyOnManager(GPUInstancerDetailManager manager, int index, List<DetailCellEdit> edits, bool undo)
+    {
+        if (!IsReady(manager)) return;
+
+        var spatialData = (GPUInstancerSpatialPartitioningData<GPUInstancerCell>)SpatialDataField.GetValue(manager);
+        var prototype = (GPUInstancerDetailPrototype)manager.prototypeList[index];
+        var densityMap = prototype.cachedDensityMapForInstance;
+        var resolution = prototype.detailResolution;
+        var cellsPerSide = spatialData.cellRowAndCollumnCountPerTerrain;
+
+        if (densityMap == null || resolution <= 0 || densityMap.Length != resolution * resolution) return;
+
+        // Number of density cells along one side of a terrain cell
+        var perCell = resolution / cellsPerSide;
+
+        var touchedCells = TouchedCells;
+        touchedCells.Clear();
+
+        for (var i = 0; i < edits.Count; i++)
+        {
+            var edit = undo ? edits[edits.Count - 1 - i] : edits[i];
+            if (edit.Index < 0 || edit.Index >= densityMap.Length) continue;
+
+            var target = undo ? edit.Before : edit.After;
+            var x = edit.Index % resolution;
+            var z = edit.Index / resolution;
+
+            densityMap[edit.Index] = target;
+
+            // The same value in the copy held by the terrain cell this density cell falls into
+            var cellX = x / perCell;
+            var cellZ = z / perCell;
+            if (cellX >= cellsPerSide || cellZ >= cellsPerSide) continue;
+
+            spatialData.GetCell(GPUInstancerCell.CalculateHash(cellX, 0, cellZ), out var cell);
+            if (cell is not GPUInstancerDetailCell detailCell) continue;
+            if (detailCell.detailMapData == null || index >= detailCell.detailMapData.Count) continue;
+
+            var cellMap = detailCell.detailMapData[index];
+            var cellIndex = x % perCell + z % perCell * perCell;
+            if (cellMap[cellIndex] == target) continue;
+
+            detailCell.totalDetailCounts[index] += target - cellMap[cellIndex];
+            cellMap[cellIndex] = target;
+            if (!touchedCells.Contains(detailCell)) touchedCells.Add(detailCell);
+        }
+
+        if (touchedCells.Count == 0) return;
+
+        for (var i = 0; i < touchedCells.Count; i++)
+        {
+            var cell = touchedCells[i];
             if (cell.detailInstanceBuffers == null || !cell.detailInstanceBuffers.TryGetValue(index, out var stale)) continue;
 
             stale?.Release();
             cell.detailInstanceBuffers.Remove(index);
         }
 
-        touchedCellCount = touchedCells.Count;
-        activeInstances = Rebuild(manager, index, prototype, spatialData, perCell);
-
-        return changed;
+        Rebuild(manager, index, prototype, spatialData, perCell);
     }
 
     /// <summary>
     /// Generates the instance buffers that are missing for one detail and rebuilds the buffer it is drawn from.
     /// Follows GPUInstancerDetailManager.MergeVisibilityBufferFromActiveCellsCoroutine.
     /// </summary>
-    private static int Rebuild(
+    private static void Rebuild(
         GPUInstancerDetailManager manager, int index, GPUInstancerDetailPrototype prototype,
         GPUInstancerSpatialPartitioningData<GPUInstancerCell> spatialData, int perCell
     )
     {
         // The game is in the middle of its own rebuild. It regenerates the buffers released above by itself.
-        if ((bool)ReplacingField.GetValue(manager)) return 0;
+        if ((bool)ReplacingField.GetValue(manager)) return;
 
-        var runtimeData = manager.runtimeDataList?.Find(data => data.prototype == prototype);
+        var runtimeData = DetailInjector.FindRuntimeData(manager.runtimeDataList, prototype);
         var grassCompute = GrassComputeField.GetValue(null) as ComputeShader;
-        if (runtimeData == null || grassCompute == null) return 0;
+        if (runtimeData == null || grassCompute == null) return;
 
         var terrainData = manager.terrain.terrainData;
         var heightResolution = terrainData.heightmapResolution;
@@ -179,8 +387,10 @@ public static class DetailPainter
 
         var total = 0;
 
-        foreach (var activeCell in spatialData.activeCellList)
+        var activeCells = spatialData.activeCellList;
+        for (var i = 0; i < activeCells.Count; i++)
         {
+            var activeCell = activeCells[i];
             if (activeCell is not GPUInstancerDetailCell cell) continue;
             if (cell.totalDetailCounts == null || index >= cell.totalDetailCounts.Count) continue;
 
@@ -214,14 +424,15 @@ public static class DetailPainter
         {
             runtimeData.transformationMatrixVisibilityBuffer?.Release();
             runtimeData.transformationMatrixVisibilityBuffer = null;
-            return 0;
+            return;
         }
 
         var merged = new ComputeBuffer(total, GPUInstancerConstants.STRIDE_SIZE_MATRIX4X4);
         var offset = 0;
 
-        foreach (var activeCell in spatialData.activeCellList)
+        for (var i = 0; i < activeCells.Count; i++)
         {
+            var activeCell = activeCells[i];
             if (activeCell is not GPUInstancerDetailCell { detailInstanceBuffers: not null } cell) continue;
             if (!cell.detailInstanceBuffers.TryGetValue(index, out var cellBuffer) || cellBuffer == null) continue;
 
@@ -233,21 +444,22 @@ public static class DetailPainter
         runtimeData.transformationMatrixVisibilityBuffer = merged;
 
         GPUInstancerUtility.InitializeGPUBuffer(runtimeData);
-
-        return total;
     }
 
-    /// <summary>Decides from the cell's coordinates alone whether painting puts instances into it.</summary>
-    private static bool IsPicked(int x, int z, float coverage)
+    /// <summary>
+    /// A fixed number from 0 to just below 1 for a density cell, worked out from its coordinates alone. With a salt
+    /// of 0 it decides which cells painting picks; erasing uses a different salt.
+    /// </summary>
+    private static float CellHash(int x, int z, uint salt)
     {
         unchecked
         {
-            var hash = (uint)(x * 73856093) ^ (uint)(z * 19349663);
+            var hash = (uint)(x * 73856093) ^ (uint)(z * 19349663) ^ salt;
             hash ^= hash >> 13;
             hash *= 0x5bd1e995;
             hash ^= hash >> 15;
 
-            return (hash & 0xFFFF) < coverage * 65536f;
+            return (hash & 0xFFFF) / 65536f;
         }
     }
 }

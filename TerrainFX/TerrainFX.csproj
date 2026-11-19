@@ -62,7 +62,7 @@
     </Reference>
     </ItemGroup>
 
-    <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(SkipDeploy)' != 'true'">
       <Exec Command="copy /Y &quot;$(TargetPath)&quot; &quot;$(SolutionDir)..\..\Client_Dev\bepinex\plugins\$(TargetName)\$(TargetFileName)&quot;" />
     </Target>
 

@@ -102,7 +102,11 @@ public class TerrainDetailOverridePatch : ModulePatch
 
             if (added > 0 && Plugin.IsolateCustomDetails.Value)
             {
-                __instance.prototypeList.RemoveAll(stock.Contains);
+                var prototypes = __instance.prototypeList;
+                for (var i = prototypes.Count - 1; i >= 0; i--)
+                {
+                    if (stock.Contains(prototypes[i])) prototypes.RemoveAt(i);
+                }
             }
         }
         catch (Exception e)
