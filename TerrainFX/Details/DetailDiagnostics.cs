@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text;
 using GPUInstancer;
 using UnityEngine;
@@ -7,7 +8,45 @@ namespace TerrainFX.Details;
 /// <summary>Logs what a map's detail managers and the game's shader bindings actually contain.</summary>
 public static class DetailDiagnostics
 {
+    private const string CrossFadeKeyword = "LOD_FADE_CROSSFADE";
+
     private static bool _bindingsDumped;
+
+    // Instanced shaders whose cross-fade support was already logged
+    private static readonly HashSet<Shader> CrossFadeLogged = [];
+
+    /// <summary>
+    /// Logs, once per shader, whether the instanced shader of each material of <paramref name="prefab"/> declares the
+    /// LOD_FADE_CROSSFADE keyword. Without it GPUI's cross-fade has nothing to blend with.
+    /// </summary>
+    public static void LogCrossFadeSupport(GameObject prefab)
+    {
+        var renderers = prefab.GetComponentsInChildren<MeshRenderer>(true);
+        for (var r = 0; r < renderers.Length; r++)
+        {
+            var materials = renderers[r].sharedMaterials;
+            for (var m = 0; m < materials.Length; m++)
+            {
+                var material = materials[m];
+                if (material == null || material.shader == null) continue;
+
+                var instanced = DetailShaders.Resolve(material.shader.name);
+                if (instanced == null || !CrossFadeLogged.Add(instanced)) continue;
+
+                if (instanced.keywordSpace.FindKeyword(CrossFadeKeyword).isValid)
+                {
+                    Plugin.Log.LogInfo($"Shader '{instanced.name}' declares {CrossFadeKeyword}, LOD cross-fade should work");
+                }
+                else
+                {
+                    Plugin.Log.LogWarning(
+                        $"Shader '{instanced.name}' has no cross-fade variant ({CrossFadeKeyword} is not declared), LOD " +
+                        "switches will stay abrupt or both LOD levels will overlap during the switch"
+                    );
+                }
+            }
+        }
+    }
 
     public static void Dump(GPUInstancerDetailManager manager)
     {

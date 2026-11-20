@@ -47,14 +47,21 @@ public sealed class DetailPreview
     private Detail _liveDetail;
     private float _liveYaw;
 
-    private readonly Dictionary<string, RenderTexture> _thumbnails = new();
+    // Keyed by the detail itself rather than its name, so a custom detail and a map detail with the same name, or the
+    // map details of two maps, never share a thumbnail or a model
+    private readonly Dictionary<Detail, RenderTexture> _thumbnails = new();
+
+    // The prefab or texture each thumbnail was last queued for, so a thumbnail is rendered again when it changes
+    // (the texture of a map detail follows the season, and a map detail's prefab is replaced on a new load)
+    private readonly Dictionary<Detail, Object> _thumbnailSources = new();
 
     // Every thumbnail texture ever made, so Dispose can destroy them with an indexed loop
     private readonly List<RenderTexture> _thumbnailTextures = [];
     private readonly List<Detail> _pendingThumbnails = [];
 
-    // One model per detail, made on first use. The radius is that of the model's bounding sphere, for framing.
-    private readonly Dictionary<string, (GameObject Model, float Radius)> _models = new();
+    // One model per detail, made on first use and made again when the detail's prefab or texture changed. The radius
+    // is that of the model's bounding sphere, for framing.
+    private readonly Dictionary<Detail, (GameObject Model, float Radius, Object Source)> _models = new();
     private readonly List<Object> _ownedAssets = [];
 
     // Render settings saved before our camera renders and put back after it
@@ -90,25 +97,35 @@ public sealed class DetailPreview
 
     /// <summary>
     /// Returns the thumbnail texture of <paramref name="detail"/>, a still view from a three-quarter angle. A new
-    /// thumbnail, or one whose texture was lost (for example after a display change), is queued and rendered by the
-    /// next <see cref="Render"/> call; until then it shows the background colour. Returns the detail's own texture
-    /// when it is a texture detail and the preview shader is missing.
+    /// thumbnail, one whose texture was lost (for example after a display change), or one whose detail got a different
+    /// prefab or texture since it was rendered, is queued and rendered by the next <see cref="Render"/> call; until
+    /// then it shows the background colour or the old picture. Returns the detail's own texture when it is a texture
+    /// detail and the preview shader is missing.
     /// </summary>
     public Texture GetThumbnail(Detail detail)
     {
         if (detail == null) return null;
         if (!detail.IsMesh && QuadShader() == null) return detail.Texture;
 
-        if (!_thumbnails.TryGetValue(detail.Name, out var texture) || texture == null)
+        if (!_thumbnails.TryGetValue(detail, out var texture) || texture == null)
         {
             texture = NewTexture(ThumbnailSize, $"TerrainFX Thumbnail {detail.Name}");
-            _thumbnails[detail.Name] = texture;
+            _thumbnails[detail] = texture;
             _thumbnailTextures.Add(texture);
         }
+
+        var source = SourceOf(detail);
+        var queue = !_thumbnailSources.TryGetValue(detail, out var renderedSource) || renderedSource != source;
 
         if (!texture.IsCreated())
         {
             texture.Create();
+            queue = true;
+        }
+
+        if (queue)
+        {
+            _thumbnailSources[detail] = source;
             if (!_pendingThumbnails.Contains(detail)) _pendingThumbnails.Add(detail);
         }
 
@@ -136,7 +153,7 @@ public sealed class DetailPreview
             var detail = _pendingThumbnails[0];
             _pendingThumbnails.RemoveAt(0);
 
-            if (_thumbnails.TryGetValue(detail.Name, out var texture) && texture != null) RenderDetail(detail, ThumbnailYaw, texture);
+            if (_thumbnails.TryGetValue(detail, out var texture) && texture != null) RenderDetail(detail, ThumbnailYaw, texture);
         }
     }
 
@@ -168,6 +185,7 @@ public sealed class DetailPreview
         for (var i = 0; i < _thumbnailTextures.Count; i++) DestroyTexture(_thumbnailTextures[i]);
         _thumbnailTextures.Clear();
         _thumbnails.Clear();
+        _thumbnailSources.Clear();
         _pendingThumbnails.Clear();
 
         for (var i = 0; i < _ownedAssets.Count; i++)
@@ -246,15 +264,26 @@ public sealed class DetailPreview
         return light;
     }
 
-    /// <summary>Shows the detail's model alone on the turned pivot, frames the camera on it and renders into the texture.</summary>
+    /// <summary>
+    /// Shows the detail's model alone on the turned pivot, frames the camera on it and renders into the texture. The
+    /// model is made first when there is none yet, or made again when the detail's prefab or texture is not the one
+    /// it was made from.
+    /// </summary>
     private void RenderDetail(Detail detail, float yaw, RenderTexture target)
     {
-        if (!_models.TryGetValue(detail.Name, out var entry) || entry.Model == null)
-        {
-            entry = CreateModel(detail);
-            if (entry.Model == null) return;
+        var source = SourceOf(detail);
+        var found = _models.TryGetValue(detail, out var entry);
 
-            _models[detail.Name] = entry;
+        if (!found || entry.Model == null || entry.Source != source)
+        {
+            if (found && entry.Model != null) Object.Destroy(entry.Model);
+            _models.Remove(detail);
+
+            var (model, radius) = CreateModel(detail);
+            if (model == null) return;
+
+            entry = (model, radius, source);
+            _models[detail] = entry;
         }
 
         if (!target.IsCreated()) target.Create();
@@ -340,6 +369,12 @@ public sealed class DetailPreview
         model.SetActive(false);
 
         return (model, Mathf.Max(0.05f, bounds.extents.magnitude));
+    }
+
+    /// <summary>The object a detail's preview model is made from: its prefab for a mesh detail, its texture otherwise.</summary>
+    private static Object SourceOf(Detail detail)
+    {
+        return detail.IsMesh ? detail.Prefab : detail.Texture;
     }
 
     /// <summary>Two vertical quads crossing at right angles, one metre tall and as wide as the texture's aspect, standing on y = 0.</summary>

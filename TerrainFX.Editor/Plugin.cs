@@ -4,6 +4,7 @@ using System.IO;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using TerrainFX.Details;
 using UnityEngine;
 
 namespace TerrainFX.Editor;
@@ -31,6 +32,9 @@ public class Plugin : BaseUnityPlugin
     /// <summary>Switches the detail painting tool to the eraser, which removes instances.</summary>
     public static ConfigEntry<KeyboardShortcut> EraserKey;
 
+    /// <summary>Switches the detail painting tool to restore, which brings back the game's own instances of a map detail.</summary>
+    public static ConfigEntry<KeyboardShortcut> RestoreKey;
+
     /// <summary>Makes the brush radius smaller by one step.</summary>
     public static ConfigEntry<KeyboardShortcut> BrushSmallerKey;
 
@@ -52,6 +56,9 @@ public class Plugin : BaseUnityPlugin
     private void Awake()
     {
         Log = Logger;
+
+        // Set here rather than in the delayed load because the density mask copies made while a raid loads must stay editable for painting map details
+        DetailStock.KeepMasksWritable = true;
 
         StartCoroutine(DelayedLoad());
     }
@@ -119,9 +126,10 @@ public class Plugin : BaseUnityPlugin
         /*
          * Hotkeys
          */
-        ToggleEditorKey = BindKey(hotkeys, "Toggle Editor", new KeyboardShortcut(KeyCode.F11), "Opens the editor in a raid, or closes it.", 8);
-        BrushKey = BindKey(hotkeys, "Brush", new KeyboardShortcut(KeyCode.B), "Switches to the brush, which adds instances of the selected detail.", 7);
-        EraserKey = BindKey(hotkeys, "Eraser", new KeyboardShortcut(KeyCode.X), "Switches to the eraser, which removes instances of the selected detail.", 6);
+        ToggleEditorKey = BindKey(hotkeys, "Toggle Editor", new KeyboardShortcut(KeyCode.F11), "Opens the editor in a raid, or closes it.", 9);
+        BrushKey = BindKey(hotkeys, "Brush", new KeyboardShortcut(KeyCode.B), "Switches to the brush, which adds instances of the selected detail.", 8);
+        EraserKey = BindKey(hotkeys, "Eraser", new KeyboardShortcut(KeyCode.X), "Switches to the eraser, which removes instances of the selected detail.", 7);
+        RestoreKey = BindKey(hotkeys, "Restore", new KeyboardShortcut(KeyCode.R), "Switches to restore, which brings back the game's own instances of the selected map detail.", 6);
         BrushSmallerKey = BindKey(hotkeys, "Brush Smaller", new KeyboardShortcut(KeyCode.LeftBracket), "Makes the brush smaller.", 5);
         BrushLargerKey = BindKey(hotkeys, "Brush Larger", new KeyboardShortcut(KeyCode.RightBracket), "Makes the brush larger.", 4);
         UndoKey = BindKey(hotkeys, "Undo", new KeyboardShortcut(KeyCode.Z, KeyCode.LeftControl), "Undoes the last brush stroke.", 3);

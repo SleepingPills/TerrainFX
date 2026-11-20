@@ -31,6 +31,10 @@ internal static class DetailDefinitions
         //             Color = new Color(0.9f, 0.9f, 1f)
         //         }
         //     }
+        //
+        // A detail can be left out of a raid entirely in some seasons. Each season is listed on its own:
+        //
+        //     HiddenSeasons = { ESeason.Winter, ESeason.SpringEarly }
 
         // DetailRegistry.Add(new Detail("TFX_Chunk_4")
         // {

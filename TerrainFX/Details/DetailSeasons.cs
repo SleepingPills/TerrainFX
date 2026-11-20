@@ -1,14 +1,20 @@
 using System.Collections.Generic;
+using EFT;
+using GPUInstancer;
 using UnityEngine;
 
 namespace TerrainFX.Details;
 
 /// <summary>
-/// Gives custom mesh details their seasonal look (<see cref="Detail.SeasonLooks"/>).
+/// Knows the season of the raid, and gives custom mesh details their seasonal look (<see cref="Detail.SeasonLooks"/>).
+///
+/// The season is first read while the map loads, from the game's session (with the game's rule that Labs is always
+/// summer), because details have to be put on the terrains before the game announces the season. The game announces
+/// the authoritative season once per raid, after the map has loaded and after it has rebuilt the detail managers for
+/// its own seasonal grass.
 ///
 /// The game's own seasonal changes only reach the materials its map data points at, so custom details are left out.
-/// The game announces the season once per raid, after the map has loaded and after it has rebuilt the detail
-/// managers for its own seasonal grass. At that moment the look is written to two places:
+/// At the announcement the look is written to two places:
 ///  - the detail's own materials, which a detail manager copies whenever it is (re)built
 ///  - the copies the detail managers are drawing with right now
 /// The materials are kept between raids, so their original values are remembered and every season is applied on top
@@ -16,6 +22,8 @@ namespace TerrainFX.Details;
 /// </summary>
 public static class DetailSeasons
 {
+    private const string LabsMapId = "laboratory";
+
     private static readonly int MainTexId = Shader.PropertyToID("_MainTex");
     private static readonly int BumpMapId = Shader.PropertyToID("_BumpMap");
     private static readonly int ColorId = Shader.PropertyToID("_Color");
@@ -24,15 +32,74 @@ public static class DetailSeasons
     // What each material looked like before any season was applied to it
     private static readonly Dictionary<Material, DetailSeasonLook> Originals = new();
 
+    // The season read while the map loaded, and the controller that announced the authoritative season of this raid
+    private static ESeason? _loadSeason;
+    private static ISeasonsController _announcedBy;
+
+    /// <summary>
+    /// The season of the current raid: read from the game's session while the map loads, then replaced by the season
+    /// the game announces. Null while it is unknown.
+    /// </summary>
+    public static ESeason? RaidSeason { get; private set; }
+
     /// <summary>Subscribes to the game's season announcement, so the look is applied once per raid.</summary>
     public static void Initialize()
     {
         Seasons.OnInitialized += OnSeasonsInitialized;
     }
 
+    /// <summary>
+    /// True when <paramref name="detail"/> lists the season of this raid in <see cref="Detail.HiddenSeasons"/>. False
+    /// while the season is unknown. It does not allocate.
+    /// </summary>
+    public static bool IsHidden(Detail detail)
+    {
+        if (!RaidSeason.HasValue) return false;
+
+        var season = RaidSeason.Value;
+        var hidden = detail.HiddenSeasons;
+        for (var i = 0; i < hidden.Count; i++)
+        {
+            if (hidden[i] == season) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reads the season of the raid that is loading from the game's session, with Labs forced to summer like the game
+    /// does. Called for every detail manager that wakes up. Once the game has announced the season of a raid, that
+    /// season is kept for as long as the raid lasts.
+    /// </summary>
+    internal static void ReadAtLoad(string mapId)
+    {
+        if (_announcedBy != null && Seasons.Controller == _announcedBy) return;
+
+        _announcedBy = null;
+
+        ESeason? season = TarkovApplication.Exist(out var app) ? app.Session?.Season : null;
+        if (season.HasValue && mapId == LabsMapId) season = ESeason.Summer;
+
+        _loadSeason = season;
+        RaidSeason = season;
+    }
+
     private static void OnSeasonsInitialized(ISeasonsController controller)
     {
-        Apply(controller.Season);
+        var season = controller.Season;
+
+        if (_loadSeason.HasValue && _loadSeason.Value != season)
+        {
+            Plugin.Log.LogWarning(
+                $"The game announced {season} but {_loadSeason.Value} was read while the map loaded, details hidden or shown " +
+                "for the season may be wrong for this raid"
+            );
+        }
+
+        RaidSeason = season;
+        _announcedBy = controller;
+
+        Apply(season);
     }
 
     public static void Apply(ESeason season)
@@ -47,45 +114,58 @@ public static class DetailSeasons
 
             var look = FindLook(definition, season);
 
-            // Materials of the detail by name. The copies a manager draws with are named "<material name>_GPUI".
-            var materials = new Dictionary<string, Material>();
             var prefabRenderers = definition.Prefab.GetComponentsInChildren<MeshRenderer>(true);
             for (var r = 0; r < prefabRenderers.Length; r++)
             {
-                var renderer = prefabRenderers[r];
-                var sharedMaterials = renderer.sharedMaterials;
+                var sharedMaterials = prefabRenderers[r].sharedMaterials;
                 for (var m = 0; m < sharedMaterials.Length; m++)
                 {
-                    var material = sharedMaterials[m];
-                    if (material == null) continue;
-
-                    ApplyLook(material, look);
-                    materials[material.name + "_GPUI"] = material;
+                    if (sharedMaterials[m] != null) ApplyLook(sharedMaterials[m], look);
                 }
             }
 
             var runtimeData = DetailInjector.FindRuntimeData(manager.runtimeDataList, prototype);
             if (runtimeData?.instanceLODs == null) continue;
 
-            var lods = runtimeData.instanceLODs;
-            for (var l = 0; l < lods.Count; l++)
-            {
-                var lod = lods[l];
-                for (var r = 0; r < lod.renderers.Count; r++)
-                {
-                    var renderer = lod.renderers[r];
-                    for (var c = 0; c < renderer.materials.Count; c++)
-                    {
-                        var copy = renderer.materials[c];
-                        if (copy != null && materials.TryGetValue(copy.name, out var source)) CopyLook(source, copy);
-                    }
-                }
-            }
-
+            CopyLooksToRuntime(definition.Prefab, runtimeData);
             applied++;
         }
 
         if (applied > 0) Plugin.Log.LogInfo($"Applied the {season} look to {applied} custom detail(s)");
+    }
+
+    /// <summary>
+    /// Copies the look of the prefab's materials onto the copies a manager draws with. The copies are named
+    /// "&lt;material name&gt;_GPUI".
+    /// </summary>
+    private static void CopyLooksToRuntime(GameObject prefab, GPUInstancerRuntimeData runtimeData)
+    {
+        var materials = new Dictionary<string, Material>();
+        var prefabRenderers = prefab.GetComponentsInChildren<MeshRenderer>(true);
+        for (var r = 0; r < prefabRenderers.Length; r++)
+        {
+            var sharedMaterials = prefabRenderers[r].sharedMaterials;
+            for (var m = 0; m < sharedMaterials.Length; m++)
+            {
+                var material = sharedMaterials[m];
+                if (material != null) materials[material.name + "_GPUI"] = material;
+            }
+        }
+
+        var lods = runtimeData.instanceLODs;
+        for (var l = 0; l < lods.Count; l++)
+        {
+            var lod = lods[l];
+            for (var r = 0; r < lod.renderers.Count; r++)
+            {
+                var renderer = lod.renderers[r];
+                for (var c = 0; c < renderer.materials.Count; c++)
+                {
+                    var copy = renderer.materials[c];
+                    if (copy != null && materials.TryGetValue(copy.name, out var source)) CopyLook(source, copy);
+                }
+            }
+        }
     }
 
     private static DetailSeasonLook FindLook(Detail definition, ESeason season)

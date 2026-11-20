@@ -200,7 +200,17 @@ public sealed class EditorWindow
 
         if (paint.Selected == null)
         {
-            GUILayout.Label("No details are registered.", _labelStyle);
+            // Without a selection there are only custom details left, all hidden this season
+            if (DetailRegistry.Details.Count == 0 && DetailStock.Assets.Count == 0)
+            {
+                GUILayout.Label("No details are registered and the map has none.", _dimLabelStyle);
+            }
+            else
+            {
+                GUILayout.Label("Every detail is hidden in the current season.", _dimLabelStyle);
+                DrawDetailGrid(paint);
+            }
+
             DrawStatus();
             return;
         }
@@ -222,6 +232,7 @@ public sealed class EditorWindow
     private void DrawBrushBox(DetailPaintMode paint)
     {
         var detail = paint.Selected;
+        var stock = paint.SelectedStock;
 
         GUILayout.BeginHorizontal(_boxStyle);
 
@@ -233,10 +244,10 @@ public sealed class EditorWindow
 
         GUILayout.Space(8f);
         GUILayout.BeginVertical();
-        GUILayout.Label(detail.Name, _headingStyle);
-        GUILayout.Label(detail.IsMesh ? "Mesh detail" : "Texture detail", _dimLabelStyle);
+        GUILayout.Label(stock != null ? stock.DisplayName : detail.Name, _headingStyle);
+        GUILayout.Label(DetailKind(detail, stock), _dimLabelStyle);
         GUILayout.Space(6f);
-        GUILayout.Label(paint.Tool == DetailTool.Brush ? "Brush" : "Eraser", _labelStyle);
+        GUILayout.Label(ToolName(paint.Tool), _labelStyle);
         GUILayout.Label($"Size  {paint.Radius:0.0} m", _labelStyle);
         GUILayout.Label($"Density  {paint.Count} / cell", _labelStyle);
         GUILayout.Label($"Coverage  {paint.Coverage * 100f:0}%", _labelStyle);
@@ -246,19 +257,46 @@ public sealed class EditorWindow
         GUILayout.EndHorizontal();
     }
 
+    private static string DetailKind(Detail detail, StockAsset stock)
+    {
+        if (stock != null) return detail.IsMesh ? "Map detail, mesh" : "Map detail, texture";
+
+        return detail.IsMesh ? "Mesh detail" : "Texture detail";
+    }
+
+    private static string ToolName(DetailTool tool)
+    {
+        return tool switch
+        {
+            DetailTool.Brush => "Brush",
+            DetailTool.Eraser => "Eraser",
+            DetailTool.Restore => "Restore",
+            _ => tool.ToString()
+        };
+    }
+
+    /// <summary>The brush, eraser and restore buttons. Restore is only enabled while a map detail is selected.</summary>
     private void DrawToolButtons(DetailPaintMode paint)
     {
         GUILayout.BeginHorizontal();
 
         if (GUILayout.Button($"Brush ({Plugin.BrushKey.Value})", paint.Tool == DetailTool.Brush ? _selectedButtonStyle : _buttonStyle))
         {
-            paint.Tool = DetailTool.Brush;
+            paint.SetTool(DetailTool.Brush);
         }
 
         if (GUILayout.Button($"Eraser ({Plugin.EraserKey.Value})", paint.Tool == DetailTool.Eraser ? _selectedButtonStyle : _buttonStyle))
         {
-            paint.Tool = DetailTool.Eraser;
+            paint.SetTool(DetailTool.Eraser);
         }
+
+        GUI.enabled = paint.SelectedStock != null;
+        if (GUILayout.Button($"Restore ({Plugin.RestoreKey.Value})", paint.Tool == DetailTool.Restore ? _selectedButtonStyle : _buttonStyle))
+        {
+            paint.SetTool(DetailTool.Restore);
+        }
+
+        GUI.enabled = true;
 
         GUILayout.EndHorizontal();
     }
@@ -290,7 +328,11 @@ public sealed class EditorWindow
         return value;
     }
 
-    /// <summary>A scrollable grid of every registered detail, three to a row, with the selected one outlined.</summary>
+    /// <summary>
+    /// A scrollable grid of the custom details and then the map's own details, three to a row under a heading per
+    /// group, with the selected one outlined. A group without details has no heading. Custom details hidden this
+    /// season are dimmed and cannot be selected.
+    /// </summary>
     private void DrawDetailGrid(DetailPaintMode paint)
     {
         GUILayout.Label("Details", _headingStyle);
@@ -298,38 +340,79 @@ public sealed class EditorWindow
         _gridScroll = GUILayout.BeginScrollView(_gridScroll, false, true, GUIStyle.none, GUI.skin.verticalScrollbar, _boxStyle, GUILayout.Height(GridHeight));
 
         var details = DetailRegistry.Details;
-        for (var row = 0; row * 3 < details.Count; row++)
+        if (details.Count > 0)
         {
-            GUILayout.BeginHorizontal();
+            GUILayout.Label("Custom details", _dimLabelStyle);
 
-            for (var column = 0; column < 3; column++)
+            for (var row = 0; row * 3 < details.Count; row++)
             {
-                var index = row * 3 + column;
-                if (index >= details.Count) break;
+                GUILayout.BeginHorizontal();
 
-                var detail = details[index];
-                var selected = detail == paint.Selected;
-
-                GUILayout.BeginVertical(GUILayout.Width(GridCell));
-
-                var thumbnail = _preview.GetThumbnail(detail);
-                // The same fields the two GUIContent constructors set: image and tooltip, or text alone
-                _tileContent.image = thumbnail;
-                _tileContent.text = thumbnail != null ? string.Empty : detail.Name;
-                _tileContent.tooltip = thumbnail != null ? detail.Name : string.Empty;
-                if (GUILayout.Button(_tileContent,selected ? _selectedTileStyle : _tileStyle, GUILayout.Width(GridCell), GUILayout.Height(GridCell)))
+                for (var column = 0; column < 3; column++)
                 {
-                    paint.Select(detail);
+                    var index = row * 3 + column;
+                    if (index >= details.Count) break;
+
+                    var detail = details[index];
+                    DrawTile(paint, detail, detail.Name, DetailSeasons.IsHidden(detail));
                 }
 
-                GUILayout.Label(detail.Name, _tileLabelStyle, GUILayout.Width(GridCell));
-                GUILayout.EndVertical();
+                GUILayout.EndHorizontal();
             }
+        }
 
-            GUILayout.EndHorizontal();
+        var assets = DetailStock.Assets;
+        if (assets.Count > 0)
+        {
+            if (details.Count > 0) GUILayout.Space(6f);
+            GUILayout.Label("Map details", _dimLabelStyle);
+
+            for (var row = 0; row * 3 < assets.Count; row++)
+            {
+                GUILayout.BeginHorizontal();
+
+                for (var column = 0; column < 3; column++)
+                {
+                    var index = row * 3 + column;
+                    if (index >= assets.Count) break;
+
+                    var asset = assets[index];
+                    DrawTile(paint, asset.Detail, asset.DisplayName, false);
+                }
+
+                GUILayout.EndHorizontal();
+            }
         }
 
         GUILayout.EndScrollView();
+    }
+
+    /// <summary>
+    /// One tile of the detail grid: the thumbnail as a button that selects the detail, and its caption below. A hidden
+    /// detail's tile is dimmed, cannot be clicked and has a second caption line saying it is hidden.
+    /// </summary>
+    private void DrawTile(DetailPaintMode paint, Detail detail, string caption, bool hidden)
+    {
+        var selected = detail == paint.Selected;
+
+        GUILayout.BeginVertical(GUILayout.Width(GridCell));
+        GUI.enabled = !hidden;
+
+        var thumbnail = _preview.GetThumbnail(detail);
+        // The same fields the two GUIContent constructors set: image and tooltip, or text alone
+        _tileContent.image = thumbnail;
+        _tileContent.text = thumbnail != null ? string.Empty : caption;
+        _tileContent.tooltip = thumbnail != null ? caption : string.Empty;
+        if (GUILayout.Button(_tileContent, selected ? _selectedTileStyle : _tileStyle, GUILayout.Width(GridCell), GUILayout.Height(GridCell)))
+        {
+            paint.Select(detail);
+        }
+
+        GUILayout.Label(caption, _tileLabelStyle, GUILayout.Width(GridCell));
+        if (hidden) GUILayout.Label("Hidden this season", _tileLabelStyle, GUILayout.Width(GridCell));
+
+        GUI.enabled = true;
+        GUILayout.EndVertical();
     }
 
     private void DrawHistoryButtons(DetailPaintMode paint)
@@ -355,6 +438,9 @@ public sealed class EditorWindow
         var terrain = paint.HoverTerrain != null ? paint.HoverTerrain.name : "-";
 
         GUILayout.Label($"Map: {DetailDensityStore.MapId ?? "-"}    Terrain: {terrain}", _dimLabelStyle);
+
+        var paintStatus = paint.PaintStatus;
+        if (paintStatus != null) GUILayout.Label(paintStatus, _labelStyle);
 
         var status = paint.Status;
         if (status != null) GUILayout.Label(status, _labelStyle);

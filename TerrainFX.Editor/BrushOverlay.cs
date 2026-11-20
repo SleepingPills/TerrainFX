@@ -7,10 +7,12 @@ namespace TerrainFX.Editor;
 
 /// <summary>
 /// Draws the brush guide on the terrain under the mouse cursor: a ring at the brush radius, a second ring where the
-/// brush starts to fade when hardness is below 1, and one small square per density cell the next click would change.
-/// The guide is drawn on top of everything (no depth test) so grass and props cannot hide it.
+/// brush starts to fade when hardness is below 1, and one small square per cell the next click would change on the
+/// hovered terrain: density cells of a custom detail, or additions and removal mask cells of the game's own instances
+/// for a map detail. The guide is drawn on top of everything (no depth test) so grass and props cannot hide it.
 ///
-/// The mesh is only rebuilt when the hover point, the brush, the selected detail or the painted cells changed.
+/// The mesh is only rebuilt when the hover point, the brush, the tool, the selected detail or asset, or the painted
+/// cells changed, or when a custom detail has just arrived on a terrain it was missing from.
 /// </summary>
 public sealed class BrushOverlay
 {
@@ -21,6 +23,7 @@ public sealed class BrushOverlay
 
     private static readonly Color BrushRing = new(0.25f, 1f, 0.45f, 0.95f);
     private static readonly Color EraserRing = new(1f, 0.3f, 0.2f, 0.95f);
+    private static readonly Color RestoreRing = new(0.3f, 0.75f, 1f, 0.95f);
     private const float InnerRingAlpha = 0.6f;
     private const float CellAlpha = 0.35f;
 
@@ -28,6 +31,7 @@ public sealed class BrushOverlay
     private readonly List<Color> _colors = [];
     private readonly List<int> _triangles = [];
     private readonly List<DetailCellEdit> _cellEdits = [];
+    private readonly List<DetailCellEdit> _removalEdits = [];
 
     private Mesh _mesh;
     private Material _material;
@@ -37,8 +41,13 @@ public sealed class BrushOverlay
     private Vector3 _builtPoint;
     private Terrain _builtTerrain;
     private DetailBrush _builtBrush;
+    private DetailTool _builtTool;
     private Detail _builtDetail;
+    private StockAsset _builtStock;
     private int _builtVersion = -1;
+
+    // True when the last build wanted the density cells of a custom detail but it was not on the terrain yet
+    private bool _builtWithoutDetail;
 
     /// <summary>
     /// Draws the guide for the brush of <paramref name="mode"/> into <paramref name="camera"/> for this frame. Does
@@ -53,16 +62,23 @@ public sealed class BrushOverlay
         var changed = mode.HoverPoint != _builtPoint
                       || mode.HoverTerrain != _builtTerrain
                       || mode.Selected != _builtDetail
+                      || mode.SelectedStock != _builtStock
+                      || mode.Tool != _builtTool
                       || mode.EditVersion != _builtVersion
                       || !SameBrush(brush, _builtBrush);
 
+        // The brush puts the detail on a terrain a few frames after the click, which changes no cells by itself
+        if (!changed && _builtWithoutDetail) changed = DetailPainter.TryGetResolution(mode.HoverTerrain, mode.Selected, out _);
+
         if (changed)
         {
-            Rebuild(mode.HoverTerrain, mode.HoverPoint, mode.Selected, brush);
+            Rebuild(mode.HoverTerrain, mode.HoverPoint, mode.Selected, mode.SelectedStock, mode.Tool, brush);
 
             _builtPoint = mode.HoverPoint;
             _builtTerrain = mode.HoverTerrain;
             _builtDetail = mode.Selected;
+            _builtStock = mode.SelectedStock;
+            _builtTool = mode.Tool;
             _builtBrush = brush;
             _builtVersion = mode.EditVersion;
         }
@@ -83,6 +99,7 @@ public sealed class BrushOverlay
         _material = null;
         _builtTerrain = null;
         _builtDetail = null;
+        _builtStock = null;
         _builtVersion = -1;
     }
 
@@ -117,13 +134,18 @@ public sealed class BrushOverlay
         return true;
     }
 
-    private void Rebuild(Terrain terrain, Vector3 point, Detail detail, DetailBrush brush)
+    private void Rebuild(Terrain terrain, Vector3 point, Detail detail, StockAsset stock, DetailTool tool, DetailBrush brush)
     {
         _vertices.Clear();
         _colors.Clear();
         _triangles.Clear();
 
-        var ringColor = brush.Erase ? EraserRing : BrushRing;
+        var ringColor = tool switch
+        {
+            DetailTool.Eraser => EraserRing,
+            DetailTool.Restore => RestoreRing,
+            _ => BrushRing
+        };
         var ringWidth = 0.06f + brush.Radius * 0.008f;
 
         AddRing(terrain, point, brush.Radius, ringWidth, ringColor);
@@ -135,7 +157,17 @@ public sealed class BrushOverlay
             AddRing(terrain, point, brush.Radius * brush.Hardness, ringWidth * 0.75f, inner);
         }
 
-        AddCells(terrain, point, detail, brush, ringColor);
+        var densityResolution = CollectCells(terrain, point, detail, stock, tool, brush);
+
+        // Too many squares to draw: only the rings are shown
+        if (_cellEdits.Count + _removalEdits.Count <= MaxCellQuads)
+        {
+            var cellColor = ringColor;
+            cellColor.a = CellAlpha;
+
+            AddCells(terrain, _cellEdits, densityResolution, cellColor);
+            AddCells(terrain, _removalEdits, terrain.terrainData.detailResolution, cellColor);
+        }
 
         _mesh.Clear();
         _mesh.SetVertices(_vertices);
@@ -172,17 +204,50 @@ public sealed class BrushOverlay
     }
 
     /// <summary>
-    /// Adds one inset square for every density cell of the hovered terrain that the next stamp would change. Draws
-    /// none when the detail is not on this terrain yet or when there would be more than 4000 of them.
+    /// Fills <see cref="_cellEdits"/> with the density (or additions) cells and <see cref="_removalEdits"/> with the
+    /// removal mask cells of the hovered terrain that the next stamp of <paramref name="tool"/> would change, and
+    /// returns the resolution of the grid the density cells are on (0 when there are none to show). For a custom
+    /// detail the brush and eraser show density cells only where the detail is already on the terrain, and records in
+    /// <see cref="_builtWithoutDetail"/> when it is not there yet. For a map detail the brush and eraser show additions
+    /// cells, the eraser and restore show removal cells, and nothing is shown on a terrain without that asset.
     /// </summary>
-    private void AddCells(Terrain terrain, Vector3 point, Detail detail, DetailBrush brush, Color ringColor)
+    private int CollectCells(Terrain terrain, Vector3 point, Detail detail, StockAsset stock, DetailTool tool, DetailBrush brush)
     {
-        // Checked first because collecting on a terrain without the detail logs a warning every time
-        if (!DetailPainter.TryGetResolution(terrain, detail.Name, out var resolution)) return;
-
         _cellEdits.Clear();
-        if (!DetailPainter.CollectEdits(terrain, point, detail.Name, brush, _cellEdits)) return;
-        if (_cellEdits.Count > MaxCellQuads) return;
+        _removalEdits.Clear();
+        _builtWithoutDetail = false;
+
+        if (stock == null)
+        {
+            if (tool == DetailTool.Restore) return 0;
+
+            // Checked first because collecting on a terrain without the detail logs a warning
+            if (!DetailPainter.TryGetResolution(terrain, detail, out var resolution))
+            {
+                _builtWithoutDetail = true;
+                return 0;
+            }
+
+            DetailPainter.CollectEdits(terrain, point, detail, brush, _cellEdits);
+            return resolution;
+        }
+
+        // Checked first because collecting on a terrain without the asset logs a warning
+        if (!DetailStock.HasStockOn(terrain, stock)) return 0;
+
+        if (tool != DetailTool.Restore) DetailStock.CollectAdditionEdits(terrain, point, stock, brush, _cellEdits);
+        if (tool != DetailTool.Brush) DetailStock.CollectRemovalEdits(terrain, point, stock, brush, tool == DetailTool.Restore, _removalEdits);
+
+        return terrain.terrainData.detailResolution;
+    }
+
+    /// <summary>
+    /// Adds one inset square for every cell in <paramref name="edits"/>, on a grid of <paramref name="resolution"/>
+    /// cells per side of the terrain (cell index z * resolution + x).
+    /// </summary>
+    private void AddCells(Terrain terrain, List<DetailCellEdit> edits, int resolution, Color color)
+    {
+        if (edits.Count == 0 || resolution <= 0) return;
 
         var size = terrain.terrainData.size;
         var stepX = size.x / resolution;
@@ -191,12 +256,9 @@ public sealed class BrushOverlay
         var insetX = stepX * CellInset;
         var insetZ = stepZ * CellInset;
 
-        var color = ringColor;
-        color.a = CellAlpha;
-
-        for (var e = 0; e < _cellEdits.Count; e++)
+        for (var e = 0; e < edits.Count; e++)
         {
-            var edit = _cellEdits[e];
+            var edit = edits[e];
             var x = edit.Index % resolution;
             var z = edit.Index / resolution;
 

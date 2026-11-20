@@ -167,8 +167,10 @@ public class TerrainEditor : MonoBehaviour
         switch (_mode)
         {
             case EditorMode.DetailPainting:
-                if (Hotkey.Pressed(Plugin.BrushKey.Value)) _detailPaint.Tool = DetailTool.Brush;
-                if (Hotkey.Pressed(Plugin.EraserKey.Value)) _detailPaint.Tool = DetailTool.Eraser;
+                if (Hotkey.Pressed(Plugin.BrushKey.Value)) _detailPaint.SetTool(DetailTool.Brush);
+                if (Hotkey.Pressed(Plugin.EraserKey.Value)) _detailPaint.SetTool(DetailTool.Eraser);
+                // Does nothing while a custom detail is selected
+                if (Hotkey.Pressed(Plugin.RestoreKey.Value)) _detailPaint.SetTool(DetailTool.Restore);
                 if (Hotkey.Pressed(Plugin.BrushSmallerKey.Value)) _detailPaint.ScaleRadius(1f / RadiusStep);
                 if (Hotkey.Pressed(Plugin.BrushLargerKey.Value)) _detailPaint.ScaleRadius(RadiusStep);
                 if (Hotkey.Pressed(Plugin.UndoKey.Value)) _detailPaint.Undo();

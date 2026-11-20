@@ -55,6 +55,22 @@ public sealed class Detail
     /// </summary>
     public readonly Dictionary<ESeason, DetailSeasonLook> SeasonLooks = new();
 
+    /// <summary>
+    /// The seasons in which this detail is not shown at all: it is not put on any terrain when a raid in one of these
+    /// seasons loads, and it cannot be painted during such a raid. Every season has to be listed on its own, AutumnLate
+    /// and SpringEarly do not follow Autumn and Spring. When the list is left empty the detail is shown in every season.
+    /// </summary>
+    public readonly List<ESeason> HiddenSeasons = [];
+
+    /// <summary>
+    /// True for the descriptions <see cref="DetailStock"/> makes of the game's own detail assets
+    /// (<see cref="StockAsset.Detail"/>). Such a detail only describes the asset for the editor (name, counts, preview)
+    /// and is never put on a detail manager: <see cref="DetailInjector.EnsureOnTerrain"/> reports it as unavailable.
+    /// Only <see cref="DetailStock"/> sets it; it is false for every detail declared in
+    /// <see cref="DetailDefinitions.DefineDetails"/>.
+    /// </summary>
+    public bool IsStock;
+
     /// <summary>Texture details only: the image drawn on the quads.</summary>
     public Texture2D Texture;
 
@@ -90,6 +106,23 @@ public sealed class Detail
     /// every one of the game's own details uses on the one map checked so far.
     /// </summary>
     public float LodBiasAdjustment = 2.5f;
+
+    /// <summary>
+    /// Mesh details only: blends between LOD levels over a short band instead of switching from one to the next
+    /// abruptly. It only does something for a prefab with a LODGroup whose shader supports cross-fading (the
+    /// LOD_FADE_CROSSFADE shader variant); the log says at map load whether the shader has it. With a shader that does
+    /// not, both LOD levels may be drawn on top of each other inside the band. Set it to false to get the game's plain
+    /// LOD switch. The default is true.
+    /// </summary>
+    public bool LodCrossFade = true;
+
+    /// <summary>
+    /// Mesh details only: how wide the cross-fade band is when <see cref="LodCrossFade"/> is on, as a share from 0 to
+    /// 1 of the on-screen size range in which a LOD level is shown. The game picks LOD levels by how much of the screen
+    /// height an instance covers, so with 0.1 the blend covers the last tenth of that range and ends where the next
+    /// level takes over. Larger values blend over a longer distance. The default of 0.1 is the game's own default.
+    /// </summary>
+    public float LodFadeWidth = 0.1f;
 
     /// <summary>
     /// Strength of the game's density mask for this detail (the game multiplies the mask channel by this number).
